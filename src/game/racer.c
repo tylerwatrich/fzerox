@@ -666,6 +666,25 @@ void Racer_SetupStartPositions(void) {
         t -= 7.3f / Course_SplineGetTangent(racerStartSegment, t, &gRacers[0].segmentPositionInfo.segmentForward);
     }
 
+#ifdef PORT
+    // Speed Lap: start alone where the 30th grid slot would be (29 more 100-unit steps back, the
+    // same spacing the single-player grid uses), so there's a full grid's worth of road to get
+    // up to speed before the timed first lap begins at the line.
+    if (Gdx_SpeedLapActive()) {
+        f32 gdxMag;
+        for (i = 29 * 20; i > 0; i--) {
+            gdxMag = Course_SplineGetTangent(racerStartSegment, t, &gRacers[0].segmentPositionInfo.segmentForward);
+            t -= 5.0f / gdxMag;
+            if (t < 0.0f) {
+                racerStartSegment = racerStartSegment->prev;
+                t *= gdxMag / Course_SplineGetTangent(racerStartSegment, 1.0f,
+                                                      &gRacers[0].segmentPositionInfo.segmentForward);
+                t += 1.0f;
+            }
+        }
+    }
+#endif
+
 #ifndef EXPANSION_KIT
     if ((gGameMode != GAMEMODE_RECORDS) && (gGameMode != GAMEMODE_GP_END_CS) &&
         (gTitleDemoState == TITLE_DEMO_INACTIVE)) {
@@ -3584,6 +3603,25 @@ static void Racer_GdxSpeedLapRecordStart(void) {
     sGdxSpeedLapBestTime = 0x7FFFFFFF;
 }
 
+static void Racer_GdxSpeedLapResetRecording(void) {
+    sGhostReplayRecordingPtr = sGhostReplayRecordingBuffer;
+    sGhostReplayRecordingSize = 0;
+    gUnableToRecordGhost = false;
+    D_800F5DE4 = 1;
+    sReplayRecordPosX = sGdxGridOriginX;
+    sReplayRecordPosY = sGdxGridOriginY;
+    sReplayRecordPosZ = sGdxGridOriginZ;
+}
+
+// Called when the player first crosses the line: the run-up isn't part of any lap, so throw its
+// recording away and anchor lap replays at the last recorded sample (right at the line).
+static void Racer_GdxSpeedLapStartTiming(void) {
+    sGdxGridOriginX = sReplayRecordPosX;
+    sGdxGridOriginY = sReplayRecordPosY;
+    sGdxGridOriginZ = sReplayRecordPosZ;
+    Racer_GdxSpeedLapResetRecording();
+}
+
 static void Racer_GdxSpeedLapLapDone(Racer* racer) {
     extern s32 gCourseIndex;
     extern int gdx_speed_lap_ghost_save(int courseIndex, const void* ghost);
@@ -3634,7 +3672,7 @@ static void Racer_GdxSpeedLapLapDone(Racer* racer) {
         ghostCar->bodyR = sGdxSpeedLapGhost.machineInfo.bodyR;
         ghostCar->bodyG = sGdxSpeedLapGhost.machineInfo.bodyG;
         ghostCar->bodyB = sGdxSpeedLapGhost.machineInfo.bodyB;
-        // First sample is relative to the grid origin (see Racer_GdxSpeedLapLapDone's reset).
+        // First sample is relative to the line origin (see Racer_GdxSpeedLapStartTiming).
         posDiff = func_800950E8(gr);
         gr->replayPosX = sGdxGridOriginX + posDiff;
         posDiff = func_800950E8(gr);
@@ -3649,14 +3687,8 @@ static void Racer_GdxSpeedLapLapDone(Racer* racer) {
         gr->initialized = true;
     }
 
-    // Restart the recording for the next lap, anchored to the grid origin like a fresh race.
-    sGhostReplayRecordingPtr = sGhostReplayRecordingBuffer;
-    sGhostReplayRecordingSize = 0;
-    gUnableToRecordGhost = false;
-    D_800F5DE4 = 1;
-    sReplayRecordPosX = sGdxGridOriginX;
-    sReplayRecordPosY = sGdxGridOriginY;
-    sReplayRecordPosZ = sGdxGridOriginZ;
+    // Restart the recording for the next lap, anchored to the origin set at the first line crossing.
+    Racer_GdxSpeedLapResetRecording();
 }
 #endif
 
@@ -4727,10 +4759,26 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
                 sp128 -= racer->lapDistance;
                 racer->unk_288++;
                 racer->unk_2A4++;
+#ifdef PORT
+                // Speed Lap: the clock doesn't run on the run-up from the back of the grid.
+                if (Gdx_SpeedLapActive() && (racer == gRacers) && (racer->lap == 0)) {
+                    racer->unk_2A4 = 0;
+                }
+#endif
                 racer->raceTime = (s32) (racer->unk_2A4 * 50) / 3;
                 if (sCourseHalfLength < sp128) {
                     racer->lapsCompletedDistance += gCurrentCourseInfo->length;
                     racer->lap++;
+#ifdef PORT
+                    // First crossing of the line in Speed Lap: start the clock and the lap ghost here.
+                    if (Gdx_SpeedLapActive() && (racer == gRacers) && (racer->lap == 1) &&
+                        (racer->lapsCompleted == 1) && (racer->completedLapsTime == 0)) {
+                        racer->unk_2A4 = 0;
+                        racer->raceTime = 0;
+                        racer->completedLapsTime = 0;
+                        Racer_GdxSpeedLapStartTiming();
+                    }
+#endif
                     if ((racer->lap == racer->lapsCompleted + 1) && (racer->lap <= (gTotalLapCount + 1))) {
                         racer->lapsCompleted = racer->lap;
                         racer->stateFlags |= RACER_STATE_CAN_BOOST;
