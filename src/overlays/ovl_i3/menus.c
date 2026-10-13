@@ -1,4 +1,7 @@
 #include "global.h"
+#ifdef PORT
+extern bool Gdx_HideLapCallouts(void); // common.c
+#endif
 #include "menus.h"
 #include "hud.h"
 #include "minimap.h"
@@ -5855,7 +5858,11 @@ Gfx* Menus_Draw(Gfx* gfx) {
             (gCameras[playerIndex].mode == CAMERA_MODE_RACE) && (sPlayerGameoverState[0] == PLAYER_GAMEOVER_NONE)) {
             gfx = Menus_DrawCannotSaveGhost(gfx);
         }
+#ifdef PORT
+        if ((gGameMode != GAMEMODE_PRACTICE) && !Gdx_HideLapCallouts()) {
+#else
         if (gGameMode != GAMEMODE_PRACTICE) {
+#endif
             if ((gRacers[playerIndex].lap == gTotalLapCount) && (gTitleDemoState == TITLE_DEMO_INACTIVE) &&
                 (D_i3_80141EA8[playerIndex].lapFlashTimer > 0) && !gGamePaused) {
                 if (((D_i3_80141EA8[playerIndex].lapFlashTimer % 20) >= 5) &&
@@ -6099,7 +6106,11 @@ Gfx* Menus_Draw(Gfx* gfx) {
             for (i = 0; i < gTotalRacers; i++) {
                 racer = &gRacers[i];
                 if (i < gNumPlayers) {
+#ifdef PORT
+                    if ((racer->lap == gTotalLapCount) && !Gdx_HideLapCallouts()) {
+#else
                     if (racer->lap == gTotalLapCount) {
+#endif
                         if ((D_i3_80141EA8[i].lapFlashTimer > 0) && !gGamePaused) {
                             if (((D_i3_80141EA8[i].lapFlashTimer % 20) >= 5) &&
                                 (D_i3_80141EA8[i].lapFlashTimer > 120)) {
@@ -6109,7 +6120,12 @@ Gfx* Menus_Draw(Gfx* gfx) {
                         }
                     }
 
+#ifdef PORT
+                    if ((racer->lap == 2) && (gTitleDemoState == TITLE_DEMO_INACTIVE) && !gGamePaused &&
+                        !Gdx_HideLapCallouts()) {
+#else
                     if ((racer->lap == 2) && (gTitleDemoState == TITLE_DEMO_INACTIVE) && !gGamePaused) {
+#endif
                         if (D_i3_80141EA8[i].lapFlashTimer > 0) {
                             if (((D_i3_80141EA8[i].lapFlashTimer % 20) >= 5) &&
                                 (D_i3_80141EA8[i].lapFlashTimer > 120)) {

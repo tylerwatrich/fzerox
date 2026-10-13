@@ -1,4 +1,17 @@
 #include "global.h"
+
+// Speed Lap (common.c) runs Time Attack with Practice's endless laps, so every HUD element that
+// Practice shows or hides for lap reasons treats Speed Lap the same way.
+#ifdef PORT
+extern bool Gdx_SpeedLapActive(void);
+extern bool Gdx_HideLapCallouts(void);
+extern int CVarGetInteger(const char* name, int defaultValue);
+#define GDX_LAP_CALLOUTS() (!Gdx_HideLapCallouts())
+#define GDX_PRACTICE_LAPS() ((gGameMode == GAMEMODE_PRACTICE) || Gdx_SpeedLapActive())
+#else
+#define GDX_LAP_CALLOUTS() 1
+#define GDX_PRACTICE_LAPS() (gGameMode == GAMEMODE_PRACTICE)
+#endif
 #include "hud.h"
 #include "menus.h"
 #include "fzx_game.h"
@@ -301,7 +314,7 @@ void func_i3_8012F324(void) {
 
     func_80078104(aBestTex, TEX_SIZE(aBestTex, sizeof(u16)), 0, 0, 0);
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         D_i3_8013EFFC = 360;
     } else {
         D_i3_8013EFFC = 180;
@@ -523,7 +536,7 @@ Gfx* Hud_DrawTimeRectangle(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
     s32 right;
     s32 left;
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         return gfx;
     }
 
@@ -558,7 +571,7 @@ Gfx* Hud_UpdatePlayerHudInfo(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
     lap = gRacers[playerIndex].lap;
     newLap = false;
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         if (gRacers[playerIndex].startNewPracticeLap) {
             newLap = true;
         }
@@ -574,11 +587,11 @@ Gfx* Hud_UpdatePlayerHudInfo(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
         if ((gRacers[playerIndex].position != 1) || (gGameMode == GAMEMODE_TIME_ATTACK)) {
             D_i3_80141EA8[playerIndex].lapIntervalCounter = 90;
         }
-        if ((lap == 2) && !sSecondLapStarted && gEnableRaceSfx && (gGameMode != GAMEMODE_PRACTICE)) {
+        if ((lap == 2) && !sSecondLapStarted && gEnableRaceSfx && (!GDX_PRACTICE_LAPS()) && GDX_LAP_CALLOUTS()) {
             Audio_TriggerSystemSE(NA_SE_17);
             sSecondLapStarted = true;
         }
-        if ((lap == gTotalLapCount) && !sFinalLapStarted && gEnableRaceSfx && (gGameMode != GAMEMODE_PRACTICE)) {
+        if ((lap == gTotalLapCount) && !sFinalLapStarted && gEnableRaceSfx && (!GDX_PRACTICE_LAPS()) && GDX_LAP_CALLOUTS()) {
             Audio_TriggerSystemSE(NA_SE_18);
             sFinalLapStarted = true;
         }
@@ -602,14 +615,32 @@ Gfx* Hud_UpdatePlayerHudInfo(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
             gfx = Hud_DrawPlayerTimer(gfx, sPreviousLapTimes[playerIndex] + 5, numPlayersIndex, playerIndex);
         }
     } else if (numPlayersIndex < 2) {
-        if (gGameMode == GAMEMODE_PRACTICE) {
+#ifdef PORT
+        // gEnhancements.Visuals.ShowCurrentLapTime: the clock counts the current lap instead of
+        // the whole race, and also appears in Practice / Speed Lap where it is otherwise hidden.
+        s32 gdxShowLapTime = CVarGetInteger("gEnhancements.Visuals.ShowCurrentLapTime", 0);
+        if (GDX_PRACTICE_LAPS() && !gdxShowLapTime) {
             return gfx;
         }
+#else
+        if (GDX_PRACTICE_LAPS()) {
+            return gfx;
+        }
+#endif
         if ((numPlayersIndex == 1) && (D_800E5FBC != 0)) {
             return gfx;
         }
 
+#ifdef PORT
+        gfx = Hud_DrawPlayerTimer(gfx,
+                                  (gdxShowLapTime ? (gRacers[playerIndex].raceTime -
+                                                     gRacers[playerIndex].completedLapsTime)
+                                                  : gRacers[playerIndex].raceTime) +
+                                      5,
+                                  numPlayersIndex, playerIndex);
+#else
         gfx = Hud_DrawPlayerTimer(gfx, gRacers[playerIndex].raceTime + 5, numPlayersIndex, playerIndex);
+#endif
     }
     return gfx;
 }
@@ -976,7 +1007,7 @@ Gfx* Hud_DrawLapRectangle(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
     s32 top;
     s32 left;
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         return gfx;
     }
     if (gGameMode == GAMEMODE_DEATH_RACE) {
@@ -1002,7 +1033,7 @@ Gfx* Hud_DrawLapCounter(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex) {
     s32 left;
     s32 lap;
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         return gfx;
     }
     if (gGameMode == GAMEMODE_DEATH_RACE) {
@@ -1688,7 +1719,7 @@ Gfx* Hud_UpdateRaceIntervalInfo(Gfx* gfx, s32 numPlayersIndex, s32 playerIndex, 
         return gfx;
     }
 
-    if (gGameMode == GAMEMODE_PRACTICE) {
+    if (GDX_PRACTICE_LAPS()) {
         return gfx;
     }
     if ((gGameMode == GAMEMODE_TIME_ATTACK) && (gFastestGhostRacer == NULL)) {
@@ -2000,7 +2031,7 @@ Gfx* Hud_DrawPracticeBestLap(Gfx* gfx) {
     s32 left;
     s32 top;
 
-    if (gGameMode != GAMEMODE_PRACTICE) {
+    if (!GDX_PRACTICE_LAPS()) {
         return gfx;
     }
 

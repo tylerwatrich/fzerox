@@ -601,11 +601,31 @@ void Camera_SettingsUpdateFollowSmooth(CameraSettings* cameraSettings, Camera* c
 
     temp_fv0 = (racer->focusVelocity.x * camera->basis.y.x) + (racer->focusVelocity.y * camera->basis.y.y) +
                (racer->focusVelocity.z * camera->basis.y.z);
+#ifdef PORT
+    {
+        // The aim point leads the machine by (50 - yaw) * 0.02 of its velocity. Stock yaw is only
+        // ever 0..180, but the free camera produces negative and wrapped angles, which inflated
+        // the lead far past stock's 1.0 max and made the camera whip and tilt at speed. Fold the
+        // yaw to its 0..180 distance from straight-behind first; stock values are unchanged.
+        f32 gdxYaw = followSmooth->targetYaw;
+        while (gdxYaw > 180.0f) {
+            gdxYaw -= 360.0f;
+        }
+        while (gdxYaw < -180.0f) {
+            gdxYaw += 360.0f;
+        }
+        if (gdxYaw < 0.0f) {
+            gdxYaw = -gdxYaw;
+        }
+        var_fv1 = (gdxYaw >= 50.0f) ? 0.0f : ((50.0f - gdxYaw) * 0.02f);
+    }
+#else
     if (followSmooth->targetYaw >= 50.0f) {
         var_fv1 = 0.0f;
     } else {
         var_fv1 = (50.0f - followSmooth->targetYaw) * 0.02f;
     }
+#endif
 
     params->at.x = camera->focusPos.x + (var_fv1 * (racer->focusVelocity.x - (temp_fv0 * camera->basis.y.x)));
     params->at.y = camera->focusPos.y + (var_fv1 * (racer->focusVelocity.y - (temp_fv0 * camera->basis.y.y)));
@@ -999,6 +1019,10 @@ void Camera_MatrixToMtx(MtxF* mtxF, Mtx* mtx2) {
 }
 
 extern s32 D_800CCFB0;
+
+#ifdef PORT
+extern int CVarGetInteger(const char* name, int defaultValue); // libultraship consolevariablebridge.h
+#endif
 
 #ifdef PORT
 // Photo-mode free camera. Only touches the primary camera's eye/at/fov for the current
@@ -3189,6 +3213,56 @@ void Camera_UpdateRace(Camera* camera, CameraSettings* cameraSettings, CameraScr
         }
         followSmooth->targetYaw = (camera->lookBackRotate * 180.0f) / sMaxCameraLookBackRotate;
     }
+#ifdef PORT
+    // Race free camera (gEnhancements.Camera.FreeCamera): the right stick's direction picks where
+    // to look around the machine (up = ahead, right = right side, down = behind) and how far it is
+    // pushed scales the angle. Releasing it eases back behind the car. Driven through the follow
+    // camera's own yaw, the same path as the stock C-Up look-back, so the real camera turns and
+    // the course culling follows it.
+    if ((playerIndex < 4) && !gGamePaused && CVarGetInteger("gEnhancements.Camera.FreeCamera", 0)) {
+        extern float gGdxRightStickX[];
+        extern float gGdxRightStickY[];
+        extern u8 gGdxFreeCamLookBack[];
+        extern float atan2f(float y, float x);
+        static f32 sGdxFreeCamYaw[4];
+        s32 port = gPlayerControlPorts[playerIndex];
+        f32 sx = gGdxRightStickX[port];
+        f32 sy = gGdxRightStickY[port];
+        f32 mag = sqrtf(SQ(sx) + SQ(sy));
+        f32 target;
+
+        if (CVarGetInteger("gEnhancements.Camera.FreeCameraInvertX", 0)) {
+            sx = -sx;
+        }
+        if (gGdxFreeCamLookBack[port]) {
+            // Stick pushed down: input_bridge.c holds C-Up, so the stock look-back above has
+            // already set targetYaw; just ease to it.
+            target = followSmooth->targetYaw;
+        } else if (mag > 0.15f) {
+            if (mag > 1.0f) {
+                mag = 1.0f;
+            }
+            // atan2(x, -y): stick up = 0, right = +90, down = 180, left = -90 (degrees).
+            target = atan2f(sx, -sy) * (180.0f / 3.14159265f) * ((mag - 0.15f) / 0.85f);
+        } else {
+            target = followSmooth->targetYaw; // idle: honour the stock C-Up look-back
+        }
+        // Take the short way round so crossing behind the car never swings through the front.
+        while ((target - sGdxFreeCamYaw[playerIndex]) > 180.0f) {
+            target -= 360.0f;
+        }
+        while ((target - sGdxFreeCamYaw[playerIndex]) < -180.0f) {
+            target += 360.0f;
+        }
+        sGdxFreeCamYaw[playerIndex] += (target - sGdxFreeCamYaw[playerIndex]) * 0.2f;
+        if (sGdxFreeCamYaw[playerIndex] > 360.0f) {
+            sGdxFreeCamYaw[playerIndex] -= 360.0f;
+        } else if (sGdxFreeCamYaw[playerIndex] < -360.0f) {
+            sGdxFreeCamYaw[playerIndex] += 360.0f;
+        }
+        followSmooth->targetYaw = sGdxFreeCamYaw[playerIndex];
+    }
+#endif
     if (camera->fovFlags & CAMERA_FOV_FLAG_1) {
 
         var_fv1 = sqrtf(SQ(racer->unk_5C.x) + SQ(racer->unk_5C.z)) - D_800CDA90;

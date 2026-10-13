@@ -162,8 +162,14 @@ extern s32 gCourseIndex;
 extern s32 gTransitionState;
 extern s32 gLeoDriveConnectionState;
 
+#ifdef PORT
+// Time Attack gains a third submenu option, Speed Lap (index 2, below RECORDS).
+const s32 kDefaultSubOptionLimits[] = { 2, 2, 0, 2, 0, 2, 0, 0 };
+const s32 kMaxSubOptionLimits[] = { 3, 2, 0, 2, 0, 3, 0, 0 };
+#else
 const s32 kDefaultSubOptionLimits[] = { 2, 1, 0, 2, 0, 2, 0, 0 };
 const s32 kMaxSubOptionLimits[] = { 3, 1, 0, 2, 0, 3, 0, 0 };
+#endif
 
 s32 MainMenu_Update(void) {
     s32 previous;
@@ -347,7 +353,11 @@ s32 MainMenu_Update(void) {
                         gNumPlayers = gModeSubOption[MODE_VS_BATTLE] + 2;
                         break;
                     case MODE_TIME_ATTACK:
+#ifdef PORT
+                        if (gModeSubOption[MODE_TIME_ATTACK] == 1) { // 2 = Speed Lap races like 0
+#else
                         if (gModeSubOption[MODE_TIME_ATTACK] != 0) {
+#endif
                             D_800CD384 = 6;
                             gMenuChangeMode = MENU_CHANGE_TO_RECORDS;
                             Audio_TriggerSystemSE(NA_SE_62);
@@ -1013,6 +1023,30 @@ Gfx* MainMenu_TimeAttackModeDraw(Gfx* gfx, Object* timeAttackModeObj) {
                                  OBJECT_TOP(timeAttackModeObj) + (i * 28) + 0x15, 1, 0, 0, 1.0f, 1.0f, true);
 #endif
     }
+#ifdef PORT
+    {
+        // Speed Lap: drawn with the game's own font (no texture exists for it), tinted with the
+        // same highlight/white prim colour logic as the stock options above.
+        static s8 sSpeedLapLabel[] = "SPEED LAP";
+        s32 labelWidth = Font_GetStringWidth(sSpeedLapLabel, FONT_SET_3, 0);
+        if (gModeSubOption[MODE_TIME_ATTACK] == 2) {
+            switch (D_800CD384) {
+                case 2:
+                case 3:
+                case 4:
+                    gDPSetPrimColor(gfx++, 0, 0, 0, 255, 0, 255);
+                    break;
+                default:
+                    gfx = func_8007DB28(gfx, 0);
+                    break;
+            }
+        } else {
+            gDPSetPrimColor(gfx++, 0, 0, 255, 255, 255, 255);
+        }
+        gfx = Font_DrawString(gfx, ((0x80 - labelWidth) / 2) + OBJECT_LEFT(timeAttackModeObj) - temp_s7,
+                              OBJECT_TOP(timeAttackModeObj) + (2 * 28) + 0x15 + 16, sSpeedLapLabel, 0, FONT_SET_3, 1);
+    }
+#endif
 
     return gfx;
 }

@@ -23,6 +23,24 @@ s32 D_800CD384 = 0;
 
 s32 gModeSubOption[8] = { 0 };
 
+#ifdef PORT
+// Speed Lap: the third Time Attack submenu option (main_menu.c). A solo Time Attack with
+// Practice's endless laps and best-lap HUD; the race never finishes, you quit from pause.
+// gModeSubOption only changes in the main menu, so it stays valid for the whole session.
+bool Gdx_SpeedLapActive(void) {
+    extern s32 gGameMode;
+    return (gGameMode == GAMEMODE_TIME_ATTACK) && (gModeSubOption[MODE_TIME_ATTACK] == 2);
+}
+
+// The lap-2 "BOOSTER OK!!" sign + "You got boost power" voice and the "FINAL LAP" sign + voice.
+// Always hidden in Speed Lap (boost is unlocked from the start and there is no final lap);
+// gEnhancements.Gameplay.HideLapCallouts hides them in every race.
+bool Gdx_HideLapCallouts(void) {
+    extern int CVarGetInteger(const char* name, int defaultValue);
+    return Gdx_SpeedLapActive() || (CVarGetInteger("gEnhancements.Gameplay.HideLapCallouts", 0) != 0);
+}
+#endif
+
 s8 gPlayerSelectionLock[] = { SELECTION_FREE, SELECTION_FREE, SELECTION_FREE, SELECTION_FREE };
 s8 D_800CD3AC[] = { 1, 1, 1, 1 };
 

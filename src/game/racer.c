@@ -9,6 +9,53 @@
 #include "fzx_effects.h"
 #include "unk_gfx.h"
 #include ASSET_HEADER(course_track_gfx.h)
+
+#ifdef PORT
+// Analog trigger throttle/brake per N64 port, published by port/input_bridge.c each poll.
+// 1.0 when gEnhancements.Input.AnalogTriggers is off, so stock behaviour is bit-identical.
+extern float gGdxThrottle[];
+extern float gGdxBrake[];
+extern s32 gNumPlayers; // defined in game code; declared again further down this file
+
+static f32 Racer_GdxThrottle(Racer* racer) {
+    if ((racer->id >= gNumPlayers) || (racer->stateFlags & RACER_STATE_DASH_PAD_BOOST)) {
+        return 1.0f; // CPU racers and dash-pad forced thrust always run at full throttle.
+    }
+    f32 t = gGdxThrottle[gPlayerControlPorts[racer->id]];
+    return (t > 0.0f) ? t : 1.0f; // game-forced A with no physical input stays full strength
+}
+
+static f32 Racer_GdxBrake(Racer* racer) {
+    if (racer->id >= gNumPlayers) {
+        return 1.0f;
+    }
+    f32 b = gGdxBrake[gPlayerControlPorts[racer->id]];
+    return (b > 0.0f) ? b : 1.0f;
+}
+
+// Side attack modes (gEnhancements.Gameplay.SideAttackMode): 0 stock double-tap Z/R,
+// 1 single press Z/R (bumpers), 2 face buttons (Cross = left, Circle = right). Per-player queue
+// so a press made during a side attack fires the frame it ends.
+extern u16 gGdxFaceSideAttack[];
+static u16 sGdxQueuedSideAttack[4];
+extern bool Gdx_SpeedLapActive(void); // common.c
+
+extern u8 gGdxFaceSpinAttack[];
+
+static bool Racer_GdxConsumeFaceSpinAttack(Racer* racer) {
+    s32 port = gPlayerControlPorts[racer->id];
+    bool spin = gGdxFaceSpinAttack[port] != 0;
+    gGdxFaceSpinAttack[port] = 0;
+    return spin;
+}
+
+static u16 Racer_GdxConsumeFaceSideAttack(Racer* racer) {
+    s32 port = gPlayerControlPorts[racer->id];
+    u16 tap = gGdxFaceSideAttack[port];
+    gGdxFaceSideAttack[port] = 0;
+    return tap;
+}
+#endif
 #include ASSET_HEADER(machine_custom_gfx.h)
 #include ASSET_HEADER(hud_gfx.h)
 #include ASSET_HEADER(machine_global_gfx.h)
@@ -1673,6 +1720,12 @@ void Racer_InitRacer(Racer* racer) {
     } else {
         racer->stateFlags = RACER_STATE_ACTIVE | RACER_STATE_FLAGS_20000000 | RACER_STATE_FLAGS_8000;
     }
+#ifdef PORT
+    // Speed Lap: boost is unlocked from the start, as in Practice (stock unlocks it after lap 1).
+    if (Gdx_SpeedLapActive()) {
+        racer->stateFlags |= RACER_STATE_CAN_BOOST;
+    }
+#endif
     if ((racer->id >= gNumPlayers) || (D_800CE77C != 0) || (gGameMode == GAMEMODE_RECORDS) ||
         (gGameMode == GAMEMODE_GP_END_CS) || (gTitleDemoState != TITLE_DEMO_INACTIVE)) {
         racer->stateFlags |= RACER_STATE_CPU_CONTROLLED;
@@ -1989,7 +2042,12 @@ void Racer_Init(void) {
         sReplayRecordPosX = Math_Round(gRacers[0].segmentPositionInfo.pos.x);
         sReplayRecordPosY = Math_Round(gRacers[0].segmentPositionInfo.pos.y);
         sReplayRecordPosZ = Math_Round(gRacers[0].segmentPositionInfo.pos.z);
+#ifdef PORT
+        // Speed Lap races its own best-lap ghost (armed at the line, below), not 3-lap ghosts.
+        if ((gCurrentGhostType != GHOST_NONE) && !Gdx_SpeedLapActive()) {
+#else
         if (gCurrentGhostType != GHOST_NONE) {
+#endif
             func_80089A74(&machineInfo);
             var_a3 = var_t0 = 0x40000000;
 
@@ -3506,6 +3564,102 @@ void func_80090AFC(Racer* racer) {
 
 extern u32 gGameFrameCount;
 
+#ifdef PORT
+// Speed Lap ghost: the recorder restarts at every lap line (so endless laps never overflow its
+// 16200-byte buffer, which raised "race data cannot be saved for ghost"), and the fastest lap's
+// recording is kept and saved as a one-lap ghost. Each lap's first sample is encoded relative to
+// the race's grid origin, exactly like a stock recording's first sample, so the replay format is
+// unchanged.
+s32 func_800950E8(GhostRacer* ghostRacer); // replay delta reader, defined below
+static s32 sGdxGridOriginX;
+static s32 sGdxGridOriginY;
+static s32 sGdxGridOriginZ;
+static s32 sGdxSpeedLapBestTime;
+static Ghost sGdxSpeedLapGhost;
+
+static void Racer_GdxSpeedLapRecordStart(void) {
+    sGdxGridOriginX = sReplayRecordPosX;
+    sGdxGridOriginY = sReplayRecordPosY;
+    sGdxGridOriginZ = sReplayRecordPosZ;
+    sGdxSpeedLapBestTime = 0x7FFFFFFF;
+}
+
+static void Racer_GdxSpeedLapLapDone(Racer* racer) {
+    extern s32 gCourseIndex;
+    extern int gdx_speed_lap_ghost_save(int courseIndex, const void* ghost);
+    s32 lapTime = racer->lapTimes[racer->lap - 2];
+    s32 i;
+
+    if (!gUnableToRecordGhost && (sGhostReplayRecordingSize > 0) && (lapTime > 0) &&
+        (lapTime < sGdxSpeedLapBestTime)) {
+        Ghost* ghost = &sGdxSpeedLapGhost;
+
+        sGdxSpeedLapBestTime = lapTime;
+        memset(ghost, 0, sizeof(*ghost));
+        ghost->ghostType = GHOST_PLAYER;
+        ghost->encodedCourseIndex = gCurrentCourseInfo->encodedCourseIndex;
+        ghost->raceTime = lapTime;
+        ghost->lapTimes[0] = lapTime;
+        ghost->replayEnd = sGhostReplayRecordingSize;
+        ghost->replaySize = sGhostReplayRecordingSize;
+        func_80089A74(&ghost->machineInfo);
+        memcpy(ghost->replayData, sGhostReplayRecordingBuffer, sGhostReplayRecordingSize);
+        // Same word-sum checksum the stock finish code computes over the replay buffer.
+        ghost->replayChecksum = 0;
+        for (i = 0; i < (s32) (sizeof(ghost->replayData) / sizeof(s32)); i++) {
+            ghost->replayChecksum += ((s32*) ghost->replayData)[i];
+        }
+        gdx_speed_lap_ghost_save(gCourseIndex, ghost);
+    }
+
+    // Replay the best lap (including one set just now) from the line, in ghost slot 1. The racer
+    // slot is set up the same way the stock Time Attack init prepares a ghost (a copy of the
+    // player's racer), but positioned at the replay's own start instead of the grid.
+    if (sGdxSpeedLapBestTime != 0x7FFFFFFF) {
+        GhostRacer* gr = &gGhostRacers[0];
+        Racer* ghostCar = &gRacers[1];
+        s32 posDiff;
+
+        gr->exists = true;
+        gr->ghost = &sGdxSpeedLapGhost;
+        gr->replayPtr = sGdxSpeedLapGhost.replayData;
+        gr->frameCount = 0;
+        gr->replayIndex = 0;
+        gr->scale = 1.0f;
+        gr->racer = ghostCar;
+        *ghostCar = gRacers[0];
+        ghostCar->id = 1;
+        ghostCar->character = sGdxSpeedLapGhost.machineInfo.character;
+        ghostCar->machineIndex = gRacers[0].machineIndex;
+        ghostCar->bodyR = sGdxSpeedLapGhost.machineInfo.bodyR;
+        ghostCar->bodyG = sGdxSpeedLapGhost.machineInfo.bodyG;
+        ghostCar->bodyB = sGdxSpeedLapGhost.machineInfo.bodyB;
+        // First sample is relative to the grid origin (see Racer_GdxSpeedLapLapDone's reset).
+        posDiff = func_800950E8(gr);
+        gr->replayPosX = sGdxGridOriginX + posDiff;
+        posDiff = func_800950E8(gr);
+        gr->replayPosY = sGdxGridOriginY + posDiff;
+        posDiff = func_800950E8(gr);
+        gr->replayPosZ = sGdxGridOriginZ + posDiff;
+        gr->pos.x = gr->replayPosX;
+        gr->pos.y = gr->replayPosY;
+        gr->pos.z = gr->replayPosZ;
+        ghostCar->modelPos = gr->pos;
+        ghostCar->velocity.x = ghostCar->velocity.y = ghostCar->velocity.z = 0.0f;
+        gr->initialized = true;
+    }
+
+    // Restart the recording for the next lap, anchored to the grid origin like a fresh race.
+    sGhostReplayRecordingPtr = sGhostReplayRecordingBuffer;
+    sGhostReplayRecordingSize = 0;
+    gUnableToRecordGhost = false;
+    D_800F5DE4 = 1;
+    sReplayRecordPosX = sGdxGridOriginX;
+    sReplayRecordPosY = sGdxGridOriginY;
+    sReplayRecordPosZ = sGdxGridOriginZ;
+}
+#endif
+
 void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
     bool isDrifting;
     s32 i;
@@ -3720,8 +3874,17 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
     }
 
     if (buttonCurrent & BTN_CDOWN) {
+#ifdef PORT
+        {
+            // Analog brake: blend damping from none (1.0) to stock full brake (0.987).
+            f32 brakeDamp = 1.0f - (0.013f * Racer_GdxBrake(racer));
+            var_fs1 *= brakeDamp;
+            var_ft4 *= brakeDamp;
+        }
+#else
         var_fs1 *= 0.987f;
         var_ft4 *= 0.987f;
+#endif
         if (gGameMode == GAMEMODE_GP_END_CS) {
             var_fs1 *= 0.9f;
             var_ft4 *= 0.9f;
@@ -3759,6 +3922,18 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
     racer->velocity.z =
         (racer->trueBasis.z.z * var_fs1) + (racer->trueBasis.y.z * var_fs0) + (racer->trueBasis.x.z * var_ft4);
 
+#ifdef PORT
+    {
+        // gEnhancements.Gameplay.HoldToBoost: 0 off, 1 Speed Lap only (default), 2 all races.
+        // Holding boost fires the next one the moment the current boost ends, instead of
+        // needing a fresh press. Players only.
+        s32 gdxHoldBoost = CVarGetInteger("gEnhancements.Gameplay.HoldToBoost", 1);
+        if ((racer->id < gNumPlayers) && (buttonCurrent & BTN_B) &&
+            ((gdxHoldBoost == 2) || ((gdxHoldBoost == 1) && Gdx_SpeedLapActive()))) {
+            buttonPressed |= BTN_B;
+        }
+    }
+#endif
     if ((buttonPressed & BTN_B) && (racer->boostTimer == 0) && (racer->energy != 0.0) &&
         (racer->stateFlags & RACER_STATE_CAN_BOOST)) {
         racer->shadowColorStrength = 1.3f;
@@ -3922,6 +4097,73 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
         racer->rButtonTimer = 10;
     }
 
+#ifdef PORT
+    {
+        // Single-press side attack (modes 1 and 2): one press = one side attack. A press made
+        // while a side attack is running is queued and fires the frame it ends, so attacks chain
+        // one press each. Players only; CPU racers keep stock double-tap behaviour.
+        s32 gdxSideMode = CVarGetInteger("gEnhancements.Gameplay.SideAttackMode", 0);
+        if ((racer->id < gNumPlayers) && (racer->id < 4) && (gdxSideMode != 0)) {
+            u16 tap;
+            if (gdxSideMode == 2) {
+                tap = Racer_GdxConsumeFaceSideAttack(racer);
+                // Triangle: spin attack toward the left stick's side; no stick = clockwise (the
+                // stock R-side spin). Single press; ignored while another attack is running.
+                if (Racer_GdxConsumeFaceSpinAttack(racer) && (racer->unk_27C == 0) &&
+                    !(racer->stateFlags & RACER_STATE_CRASHED)) {
+                    bool spinLeft = gControllers[gPlayerControlPorts[racer->id]].stickX < -20;
+                    racer->unk_27C = spinLeft ? 0x80 : 0xF80;
+                    racer->unk_280 = spinLeft ? 0x100 : -0x100;
+                    racer->attackState = ATTACK_STATE_SPIN;
+                    sGdxQueuedSideAttack[racer->id] = 0;
+                    tap = 0;
+                    if (gEnableRaceSfx) {
+                        Audio_PlayerTriggerSEStart(racer->id, NA_SE_2);
+                    }
+                }
+            } else {
+                tap = buttonPressed & (BTN_Z | BTN_R);
+                if ((tap != BTN_Z) && (tap != BTN_R)) {
+                    tap = 0; // both at once: leave to the stock path
+                }
+            }
+            if (racer->stateFlags & RACER_STATE_CRASHED) {
+                sGdxQueuedSideAttack[racer->id] = 0;
+                tap = 0;
+            }
+            if ((tap != 0) && (racer->unk_27C != 0)) {
+                if (racer->attackState == ATTACK_STATE_SIDE) {
+                    sGdxQueuedSideAttack[racer->id] = tap;
+                }
+                if (gdxSideMode == 1) {
+                    buttonPressed &= ~(BTN_Z | BTN_R);
+                }
+                tap = 0;
+            } else if ((tap == 0) && (sGdxQueuedSideAttack[racer->id] != 0) && (racer->unk_27C == 0)) {
+                tap = sGdxQueuedSideAttack[racer->id];
+                sGdxQueuedSideAttack[racer->id] = 0;
+            }
+            if (gdxSideMode == 1) {
+                // Feed the press through the stock switch with the double-tap window satisfied,
+                // so Z with R held (or R with Z held) still spins.
+                racer->zButtonTimer = 0;
+                racer->rButtonTimer = 0;
+                if (tap != 0) {
+                    buttonPressed = (buttonPressed & ~(BTN_Z | BTN_R)) | tap;
+                }
+            } else if (tap != 0) {
+                // Face buttons: start the side attack directly (never a spin; Z/R double-tap
+                // spin and side attacks still work through the stock path below).
+                racer->unk_27C = (tap == BTN_Z) ? 0x80 : 0xF80;
+                racer->unk_280 = (tap == BTN_Z) ? 0x100 : -0x100;
+                racer->attackState = ATTACK_STATE_SIDE;
+                if (gEnableRaceSfx) {
+                    Audio_PlayerTriggerSEStart(racer->id, NA_SE_6);
+                }
+            }
+        }
+    }
+#endif
     switch (buttonPressed & (BTN_Z | BTN_R)) {
         case BTN_Z:
             if ((racer->zButtonTimer < 15) && (racer->unk_27C == 0)) {
@@ -4301,6 +4543,10 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
             }
         }
         var_fv1 -= ((directionChange * 0.5f) + (racer->driftAttackForce * 0.16f));
+#ifdef PORT
+        // Analog throttle: scale the engine's target force by trigger pressure (1.0 = stock).
+        var_fv1 *= Racer_GdxThrottle(racer);
+#endif
         if (var_fv1 < 0.0f) {
             racer->accelerationForce = 0.0f;
         } else {
@@ -4500,8 +4746,32 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
                         { extern void GameEvents_FireOnLapCompleted(s32 racerId, s32 lap); GameEvents_FireOnLapCompleted(racer->id, racer->lap); }
 #endif
                         racer->startNewPracticeLap = true;
-#ifndef EXPANSION_KIT
+#ifdef PORT
+                        if (Gdx_SpeedLapActive() && (racer == gRacers)) {
+                            Racer_GdxSpeedLapLapDone(racer);
+                        }
+#endif
+#ifdef PORT
+                        {
+                            // gEnhancements.Gameplay.RefillEnergyEachLap: 0 off, 1 Speed Lap only
+                            // (default), 2 all races. Players only; CPU racers are never refilled.
+                            s32 gdxRefill = CVarGetInteger("gEnhancements.Gameplay.RefillEnergyEachLap", 1);
+                            if ((racer->id < gNumPlayers) &&
+                                ((gdxRefill == 2) || ((gdxRefill == 1) && Gdx_SpeedLapActive()))) {
+                                racer->energy = racer->maxEnergy;
+                            }
+                        }
+#endif
+#if defined(PORT) && !defined(EXPANSION_KIT)
+                        if ((gGameMode == GAMEMODE_PRACTICE) || (gGameMode == GAMEMODE_DEATH_RACE) ||
+                            Gdx_SpeedLapActive()) {
+#elif !defined(EXPANSION_KIT)
                         if ((gGameMode == GAMEMODE_PRACTICE) || (gGameMode == GAMEMODE_DEATH_RACE)) {
+#elif defined(PORT)
+                        // Expansion Kit build (G-Diffuser's default): Speed Lap shares Practice's
+                        // best-lap tracking and endless lap loop here too.
+                        if ((gGameMode == GAMEMODE_PRACTICE) || (gGameMode == GAMEMODE_DEATH_RACE) ||
+                            (gGameMode == GAMEMODE_COURSE_EDIT) || Gdx_SpeedLapActive()) {
 #else
                         if ((gGameMode == GAMEMODE_PRACTICE) || (gGameMode == GAMEMODE_DEATH_RACE) ||
                             (gGameMode == GAMEMODE_COURSE_EDIT)) {
@@ -5276,6 +5546,9 @@ void Racer_Update(void) {
                 sReplayRecordPosX = Math_Round(gRacers[0].segmentPositionInfo.pos.x);
                 sReplayRecordPosY = Math_Round(gRacers[0].segmentPositionInfo.pos.y);
                 sReplayRecordPosZ = Math_Round(gRacers[0].segmentPositionInfo.pos.z);
+#ifdef PORT
+                Racer_GdxSpeedLapRecordStart();
+#endif
 
                 for (ghostRacer = &gGhostRacers[2]; ghostRacer >= gGhostRacers; ghostRacer--) {
                     if (ghostRacer->exists) {
