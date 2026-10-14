@@ -32,7 +32,11 @@ s32 gGdxSpeedLapSelected = 0;
 
 bool Gdx_SpeedLapActive(void) {
     extern s32 gGameMode;
-    return (gGameMode == GAMEMODE_TIME_ATTACK) && (gGdxSpeedLapSelected != 0);
+    extern s8 gTitleDemoState;
+    // The attract-mode demos also run as Time Attack; never treat them as Speed Lap (they used to
+    // save the CPU demo driver's laps as Speed Lap records).
+    return (gGameMode == GAMEMODE_TIME_ATTACK) && (gGdxSpeedLapSelected != 0) &&
+           (gTitleDemoState == TITLE_DEMO_INACTIVE);
 }
 
 // The lap-2 "BOOSTER OK!!" sign + "You got boost power" voice and the "FINAL LAP" sign + voice.

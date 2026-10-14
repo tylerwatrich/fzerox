@@ -2431,6 +2431,10 @@ void func_8008D824(void) {
     func_8008D5F4(&courseInfo->bestTimeMachine, sRecordsMachineIndices[var]);
 }
 
+#ifdef PORT
+static void Racer_GdxSpeedLapLoadRecord(void); // below, with the other Speed Lap helpers
+#endif
+
 void func_8008D8E8(void) {
     s32 i;
 
@@ -2445,6 +2449,9 @@ void func_8008D8E8(void) {
             func_8008D5F4(&gGhosts[i].machineInfo, i + 7);
         }
     }
+#ifdef PORT
+    Racer_GdxSpeedLapLoadRecord();
+#endif
 }
 
 void func_8008D97C(void) {
@@ -3656,14 +3663,68 @@ s32 func_800950E8(GhostRacer* ghostRacer); // replay delta reader, defined below
 static s32 sGdxGridOriginX;
 static s32 sGdxGridOriginY;
 static s32 sGdxGridOriginZ;
-static s32 sGdxSpeedLapBestTime;
-static Ghost sGdxSpeedLapGhost;
+static s32 sGdxSpeedLapBestTime;   // this session's best lap
+static Ghost sGdxSpeedLapGhost;    // this session's best lap replay
+static s32 sGdxSpeedLapRecordTime; // all-time best lap on this course (0x7FFFFFFF: none)
+static Ghost sGdxSpeedLapRecordGhost;
+static s32 sGdxSpeedLapMachineTime; // best lap on this course with the player's machine (0x7FFFFFFF: none)
+static Ghost sGdxSpeedLapMachineGhost;
+s32 gGdxSpeedLapNewRecordTimer;    // frames left to show the NEW RECORD callout (hud.c)
+
+// HUD access (hud.c): the course's all-time Speed Lap record, or 0x7FFFFFFF if none.
+s32 Gdx_SpeedLapRecordTime(void) {
+    return sGdxSpeedLapRecordTime;
+}
+
+// Identifies a machine's model for the per-machine best: the character, plus the parts for an
+// edited custom machine. Colours, logo and number don't count.
+static u32 Racer_GdxMachineKey(MachineInfo* m) {
+    u32 key = m->character | ((u32) (m->customType & 0xF) << 8);
+
+#ifdef EXPANSION_KIT
+    if (m->customType == CUSTOM_MACHINE_EDITED) {
+        key |= ((u32) (m->frontType & 0xF) << 12) | ((u32) (m->rearType & 0xF) << 16) | ((u32) m->wingType << 20);
+    }
+#endif
+    return key;
+}
 
 static void Racer_GdxSpeedLapRecordStart(void) {
+    extern int gdx_speed_lap_ghost_load(s32 encodedCourseIndex, void* outGhost);
+
     sGdxGridOriginX = sReplayRecordPosX;
     sGdxGridOriginY = sReplayRecordPosY;
     sGdxGridOriginZ = sReplayRecordPosZ;
     sGdxSpeedLapBestTime = 0x7FFFFFFF;
+    gGdxSpeedLapNewRecordTimer = 0;
+}
+
+// Race load (func_8008D8E8, alongside the stock ghost machine models): load the saved all-time
+// best lap for this course and the best lap with the player's machine, raced as ghosts from the
+// first lap. Their machine models are built in ghost machine slots 7 and 8 so each ghost looks
+// like the machine that set it.
+static void Racer_GdxSpeedLapLoadRecord(void) {
+    extern int gdx_speed_lap_ghost_load(s32 encodedCourseIndex, void* outGhost);
+    extern int gdx_speed_lap_machine_ghost_load(s32 encodedCourseIndex, u32 machineKey, void* outGhost);
+    MachineInfo gdxPlayerMachine;
+
+    sGdxSpeedLapRecordTime = 0x7FFFFFFF;
+    sGdxSpeedLapMachineTime = 0x7FFFFFFF;
+    if (!Gdx_SpeedLapActive()) {
+        return;
+    }
+    if ((gdx_speed_lap_ghost_load(gCurrentCourseInfo->encodedCourseIndex, &sGdxSpeedLapRecordGhost) == 0) &&
+        (sGdxSpeedLapRecordGhost.raceTime > 0) && (sGdxSpeedLapRecordGhost.replayEnd > 0)) {
+        sGdxSpeedLapRecordTime = sGdxSpeedLapRecordGhost.raceTime;
+        func_8008D5F4(&sGdxSpeedLapRecordGhost.machineInfo, 7);
+    }
+    func_80089A74(&gdxPlayerMachine);
+    if ((gdx_speed_lap_machine_ghost_load(gCurrentCourseInfo->encodedCourseIndex,
+                                          Racer_GdxMachineKey(&gdxPlayerMachine), &sGdxSpeedLapMachineGhost) == 0) &&
+        (sGdxSpeedLapMachineGhost.raceTime > 0) && (sGdxSpeedLapMachineGhost.replayEnd > 0)) {
+        sGdxSpeedLapMachineTime = sGdxSpeedLapMachineGhost.raceTime;
+        func_8008D5F4(&sGdxSpeedLapMachineGhost.machineInfo, 8);
+    }
 }
 
 static void Racer_GdxSpeedLapResetRecording(void) {
@@ -3676,18 +3737,109 @@ static void Racer_GdxSpeedLapResetRecording(void) {
     sReplayRecordPosZ = sGdxGridOriginZ;
 }
 
+// Starts replaying `ghost` from the line in ghost slot `slot`, driving racer slot `racerIndex`. Set up
+// the way the stock Time Attack init prepares a ghost (a copy of the player's racer), positioned at
+// the replay's first sample.
+static void Racer_GdxSpeedLapArmGhost(s32 slot, s32 racerIndex, Ghost* ghost) {
+    GhostRacer* gr = &gGhostRacers[slot];
+    Racer* ghostCar = &gRacers[racerIndex];
+    s32 posDiff;
+
+    gr->exists = true;
+    gr->ghost = ghost;
+    gr->replayPtr = ghost->replayData;
+    gr->frameCount = 0;
+    gr->replayIndex = 0;
+    gr->scale = 1.0f;
+    gr->racer = ghostCar;
+    *ghostCar = gRacers[0];
+    ghostCar->id = racerIndex;
+    ghostCar->character = ghost->machineInfo.character;
+    ghostCar->machineIndex = gRacers[0].machineIndex;
+    if ((ghost == &sGdxSpeedLapRecordGhost) || (ghost == &sGdxSpeedLapMachineGhost)) {
+        MachineInfo gdxPlayerMachine;
+        func_80089A74(&gdxPlayerMachine);
+        // Set by a machine that differs from the player's: use the model built for it at load.
+        if (func_8008B23C(&ghost->machineInfo, &gdxPlayerMachine) != 0) {
+            ghostCar->machineIndex = (ghost == &sGdxSpeedLapRecordGhost) ? 7 : 8;
+        }
+    }
+#ifndef EXPANSION_KIT
+    ghostCar->shadowType = gMachines[ghostCar->character].shadowType;
+    ghostCar->boostersType = gMachines[ghostCar->character].boostersType;
+#else
+    if (ghost->machineInfo.customType == CUSTOM_MACHINE_EDITED) {
+        ghostCar->shadowType = D_800CDD04[ghost->machineInfo.frontType * 7 + ghost->machineInfo.rearType];
+        ghostCar->boostersType = ghost->machineInfo.rearType + 30;
+    } else {
+        ghostCar->shadowType = sDefaultMachines[ghostCar->character].shadowType;
+        ghostCar->boostersType = sDefaultMachines[ghostCar->character].boostersType;
+    }
+#endif
+    ghostCar->bodyR = ghost->machineInfo.bodyR;
+    ghostCar->bodyG = ghost->machineInfo.bodyG;
+    ghostCar->bodyB = ghost->machineInfo.bodyB;
+    // The first sample is relative to the fixed line origin (see Racer_GdxSpeedLapStartTiming).
+    posDiff = func_800950E8(gr);
+    gr->replayPosX = sGdxGridOriginX + posDiff;
+    posDiff = func_800950E8(gr);
+    gr->replayPosY = sGdxGridOriginY + posDiff;
+    posDiff = func_800950E8(gr);
+    gr->replayPosZ = sGdxGridOriginZ + posDiff;
+    gr->pos.x = gr->replayPosX;
+    gr->pos.y = gr->replayPosY;
+    gr->pos.z = gr->replayPosZ;
+    ghostCar->modelPos = gr->pos;
+    ghostCar->velocity.x = ghostCar->velocity.y = ghostCar->velocity.z = 0.0f;
+    gr->initialized = true;
+}
+
+// At every line crossing, up to three ghosts with no duplicates:
+//  slot 0: the all-time course record;
+//  slot 2: the best lap with the player's machine, unless the record was set with it;
+//  slot 1: this session's best, when slower than the player machine's best.
+static void Racer_GdxSpeedLapArmGhosts(void) {
+    MachineInfo gdxPlayerMachine;
+    s32 recordIsMine;
+    s32 machineBest;
+
+    gGhostRacers[0].exists = false;
+    gGhostRacers[1].exists = false;
+    gGhostRacers[2].exists = false;
+    func_80089A74(&gdxPlayerMachine);
+    recordIsMine = (sGdxSpeedLapRecordTime != 0x7FFFFFFF) &&
+                   (Racer_GdxMachineKey(&sGdxSpeedLapRecordGhost.machineInfo) == Racer_GdxMachineKey(&gdxPlayerMachine));
+    machineBest = recordIsMine ? sGdxSpeedLapRecordTime : sGdxSpeedLapMachineTime;
+    if (sGdxSpeedLapRecordTime != 0x7FFFFFFF) {
+        Racer_GdxSpeedLapArmGhost(0, 1, &sGdxSpeedLapRecordGhost);
+    }
+    if (!recordIsMine && (sGdxSpeedLapMachineTime != 0x7FFFFFFF)) {
+        Racer_GdxSpeedLapArmGhost(2, 3, &sGdxSpeedLapMachineGhost);
+    }
+    if ((sGdxSpeedLapBestTime != 0x7FFFFFFF) && (sGdxSpeedLapBestTime > machineBest)) {
+        Racer_GdxSpeedLapArmGhost(1, 2, &sGdxSpeedLapGhost);
+    }
+}
+
 // Called when the player first crosses the line: the run-up isn't part of any lap, so throw its
-// recording away and anchor lap replays at the last recorded sample (right at the line).
+// recording away. Lap replays are anchored to a fixed point on the start line (the spline at the
+// start of segment 0) rather than wherever the machine crossed, so a record ghost saved in an
+// earlier session lines up with this one.
 static void Racer_GdxSpeedLapStartTiming(void) {
-    sGdxGridOriginX = sReplayRecordPosX;
-    sGdxGridOriginY = sReplayRecordPosY;
-    sGdxGridOriginZ = sReplayRecordPosZ;
+    Vec3f gdxLine;
+
+    Course_SplineGetPosition(&gCurrentCourseInfo->courseSegments[0], 0.0f, &gdxLine);
+    sGdxGridOriginX = Math_Round(gdxLine.x);
+    sGdxGridOriginY = Math_Round(gdxLine.y);
+    sGdxGridOriginZ = Math_Round(gdxLine.z);
     Racer_GdxSpeedLapResetRecording();
+    Racer_GdxSpeedLapArmGhosts();
 }
 
 static void Racer_GdxSpeedLapLapDone(Racer* racer) {
     extern s32 gCourseIndex;
     extern int gdx_speed_lap_ghost_save(int courseIndex, const void* ghost);
+    extern int gdx_speed_lap_machine_ghost_save(int courseIndex, u32 machineKey, const void* ghost);
     s32 lapTime = racer->lapTimes[racer->lap - 2];
     s32 i;
 
@@ -3710,47 +3862,23 @@ static void Racer_GdxSpeedLapLapDone(Racer* racer) {
         for (i = 0; i < (s32) (sizeof(ghost->replayData) / sizeof(s32)); i++) {
             ghost->replayChecksum += ((s32*) ghost->replayData)[i];
         }
-        gdx_speed_lap_ghost_save(gCourseIndex, ghost);
+        if (lapTime < sGdxSpeedLapMachineTime) {
+            // New best for this machine on this course.
+            sGdxSpeedLapMachineTime = lapTime;
+            sGdxSpeedLapMachineGhost = *ghost;
+            gdx_speed_lap_machine_ghost_save(gCourseIndex, Racer_GdxMachineKey(&ghost->machineInfo), ghost);
+        }
+        if (lapTime < sGdxSpeedLapRecordTime) {
+            // New course record: it becomes the record ghost and is saved to disk.
+            sGdxSpeedLapRecordTime = lapTime;
+            sGdxSpeedLapRecordGhost = *ghost;
+            gdx_speed_lap_ghost_save(gCourseIndex, ghost);
+            gGdxSpeedLapNewRecordTimer = 240;
+        }
     }
 
-    // Replay the best lap (including one set just now) from the line, in ghost slot 1. The racer
-    // slot is set up the same way the stock Time Attack init prepares a ghost (a copy of the
-    // player's racer), but positioned at the replay's own start instead of the grid.
-    if (sGdxSpeedLapBestTime != 0x7FFFFFFF) {
-        GhostRacer* gr = &gGhostRacers[0];
-        Racer* ghostCar = &gRacers[1];
-        s32 posDiff;
-
-        gr->exists = true;
-        gr->ghost = &sGdxSpeedLapGhost;
-        gr->replayPtr = sGdxSpeedLapGhost.replayData;
-        gr->frameCount = 0;
-        gr->replayIndex = 0;
-        gr->scale = 1.0f;
-        gr->racer = ghostCar;
-        *ghostCar = gRacers[0];
-        ghostCar->id = 1;
-        ghostCar->character = sGdxSpeedLapGhost.machineInfo.character;
-        ghostCar->machineIndex = gRacers[0].machineIndex;
-        ghostCar->bodyR = sGdxSpeedLapGhost.machineInfo.bodyR;
-        ghostCar->bodyG = sGdxSpeedLapGhost.machineInfo.bodyG;
-        ghostCar->bodyB = sGdxSpeedLapGhost.machineInfo.bodyB;
-        // First sample is relative to the line origin (see Racer_GdxSpeedLapStartTiming).
-        posDiff = func_800950E8(gr);
-        gr->replayPosX = sGdxGridOriginX + posDiff;
-        posDiff = func_800950E8(gr);
-        gr->replayPosY = sGdxGridOriginY + posDiff;
-        posDiff = func_800950E8(gr);
-        gr->replayPosZ = sGdxGridOriginZ + posDiff;
-        gr->pos.x = gr->replayPosX;
-        gr->pos.y = gr->replayPosY;
-        gr->pos.z = gr->replayPosZ;
-        ghostCar->modelPos = gr->pos;
-        ghostCar->velocity.x = ghostCar->velocity.y = ghostCar->velocity.z = 0.0f;
-        gr->initialized = true;
-    }
-
-    // Restart the recording for the next lap, anchored to the origin set at the first line crossing.
+    Racer_GdxSpeedLapArmGhosts();
+    // Restart the recording for the next lap, anchored to the fixed line origin.
     Racer_GdxSpeedLapResetRecording();
 }
 #endif

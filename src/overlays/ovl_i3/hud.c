@@ -19,6 +19,9 @@ extern int CVarGetInteger(const char* name, int defaultValue);
 #include "fzx_racer.h"
 #include "fzx_machine.h"
 #include "minimap.h"
+#ifdef PORT
+#include "fzx_font.h" // Speed Lap record label
+#endif
 #include ASSET_HEADER(course_track_gfx.h)
 #include ASSET_HEADER(machine_custom_gfx.h)
 #include ASSET_HEADER(hud_gfx.h)
@@ -2027,6 +2030,93 @@ void Hud_UpdateCharacterPortraits(void) {
 extern s32 gPracticeBestLap;
 extern s16 gStartNewBestLap;
 
+#ifdef PORT
+// Speed Lap course record under BEST LAP: a "RECORD" label and the all-time best lap in cyan. When a
+// lap beats it, the label reads "NEW RECORD!" and both flash for a few seconds.
+extern bool Gdx_SpeedLapActive(void);
+extern s32 Gdx_SpeedLapRecordTime(void);
+extern s32 gGdxSpeedLapNewRecordTimer;
+
+static Gfx* Hud_GdxDrawColorTimer(Gfx* gfx, s32 time, s32 left, s32 top, f32 scale, u8 r, u8 g, u8 b) {
+    s32 offset = 0;
+    s32 timeField;
+
+    gDPPipeSync(gfx++);
+    gDPSetCombineLERP(gfx++, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0,
+                      TEXEL0, 0);
+    gDPSetPrimColor(gfx++, 0, 0, r, g, b, 255);
+    if (time >= MAX_TIMER) {
+        time = MAX_TIMER;
+    }
+    timeField = time / 60000;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, (timeField / 10) % 10, scale);
+    offset += 8;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, timeField % 10, scale);
+    offset += 8;
+    time -= timeField * 60000;
+    timeField = time / 1000;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, TIMER_DIGIT_PRIME, scale);
+    offset += 8;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, timeField / 10, scale);
+    offset += 8;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, timeField % 10, scale);
+    offset += 8;
+    time -= timeField * 1000;
+    timeField = time / 10;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, TIMER_DIGIT_DOUBLE_PRIME, scale);
+    offset += 8;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, timeField / 10, scale);
+    offset += 8;
+    gfx = Hud_DrawTimerDigitRectangle(gfx, left + offset, top, timeField % 10, scale);
+    return gfx;
+}
+
+static Gfx* Hud_GdxDrawSpeedLapRecord(Gfx* gfx) {
+    static s8 sRecordLabel[] = "RECORD";
+    static s8 sNewRecordLabel[] = "NEW RECORD!";
+    extern int gdx_widescreen_ui_active(void);
+    s32 record = Gdx_SpeedLapRecordTime();
+    bool newRecord = gGdxSpeedLapNewRecordTimer > 0;
+    bool show = true;
+    int wide;
+
+    if (!Gdx_SpeedLapActive() || (record == 0x7FFFFFFF)) {
+        return gfx;
+    }
+    if (newRecord) {
+        if (!gGamePaused) {
+            gGdxSpeedLapNewRecordTimer--;
+        }
+        show = (gGdxSpeedLapNewRecordTimer % 20) >= 5;
+    }
+    if (!show) {
+        return gfx;
+    }
+    gDPPipeSync(gfx++);
+    gDPSetCombineLERP(gfx++, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0, TEXEL0, 0, PRIMITIVE, 0,
+                      TEXEL0, 0);
+    gDPSetPrimColor(gfx++, 0, 0, 0, 220, 255, 255);
+    // Right side, under the race timer (which sits at 230,38 and is 16 tall), anchored right like it
+    // is in widescreen. FONT_SET_2 is the game's small 8-pixel font, drawn at native size so it
+    // stays crisp; its `top` argument is the text's bottom edge.
+    wide = gdx_widescreen_ui_active();
+    if (wide) {
+        gSPSetExtraGeometryMode(gfx++, G_EX_WIDESCREEN_ANCHOR_RIGHT);
+    }
+    gfx = Font_DrawString(gfx, 230, 64, newRecord ? sNewRecordLabel : sRecordLabel, 1, FONT_SET_2, 0);
+    // The font replaced the loaded texture; the digit rectangles index into the timer symbols.
+    gDPPipeSync(gfx++);
+    gDPLoadTextureBlock(gfx++, aTimerSymbolsTex, G_IM_FMT_RGBA, G_IM_SIZ_16b, 8, 224, 0, G_TX_NOMIRROR | G_TX_WRAP,
+                        G_TX_NOMIRROR | G_TX_WRAP, G_TX_NOMASK, G_TX_NOMASK, G_TX_NOLOD, G_TX_NOLOD);
+    gDPSetTextureFilter(gfx++, G_TF_POINT);
+    gfx = Hud_GdxDrawColorTimer(gfx, record + 5, 230, 65, 1.0f, 0, 220, 255);
+    if (wide) {
+        gSPClearExtraGeometryMode(gfx++, G_EX_WIDESCREEN_ANCHOR_RIGHT);
+    }
+    return gfx;
+}
+#endif
+
 Gfx* Hud_DrawPracticeBestLap(Gfx* gfx) {
     s32 left;
     s32 top;
@@ -2077,6 +2167,9 @@ Gfx* Hud_DrawPracticeBestLap(Gfx* gfx) {
 
     gSPTextureRectangle(gfx++, left << 2, top << 2, (left + 16) << 2, (top + 12) << 2, 0, 0, 0, 1 << 10, 1 << 10);
 
+#ifdef PORT
+    gfx = Hud_GdxDrawSpeedLapRecord(gfx);
+#endif
     return gfx;
 }
 
