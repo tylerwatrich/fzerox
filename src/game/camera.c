@@ -3082,6 +3082,17 @@ void Camera_UpdateRaceIntro(Camera* camera, CameraSettings* cameraSettings) {
     orbit->anchorPos = racer->focusPos;
     orbit->basis = racer->trueBasis;
 
+#ifdef PORT
+    {
+        // Speed Lap rolling start: skip the fly-around and go straight to the chase camera,
+        // since the machine is already driving through the countdown.
+        extern bool Gdx_SpeedLapActive(void); // common.c
+        if (Gdx_SpeedLapActive() && (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+            camera->timer = 300;
+        }
+    }
+#endif
+
     temp_fv0 = (f32) camera->timer / 300.0f;
     temp_fv0 = (-2.0f * temp_fv0 * temp_fv0 * temp_fv0) + (3.0f * temp_fv0 * temp_fv0);
     orbit->targetDistance = (-880.0f * temp_fv0) + 1000.0f;

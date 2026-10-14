@@ -39,6 +39,27 @@ static f32 Racer_GdxBrake(Racer* racer) {
 extern u16 gGdxFaceSideAttack[];
 static u16 sGdxQueuedSideAttack[4];
 extern bool Gdx_SpeedLapActive(void); // common.c
+// Speed Lap rolling start (see Racer_SetupStartPositions and the countdown in Racer_Update).
+static f32 sGdxGridBackLapDist;  // lapDistance of the back-of-grid point
+static s32 sGdxRollHoldFrames;   // frames the countdown has been held waiting for the run-in
+static bool sGdxRollSynced;      // countdown released toward GO
+static Racer sGdxRollSaved;      // player's handling stats before the autopilot overwrote them
+
+// The CPU driver swaps in its own handling values (accel curve, turn rates, grip, speed cap);
+// put the player's machine's values back.
+static void Racer_GdxRollRestoreStats(Racer* racer) {
+    racer->unk_1B0 = sGdxRollSaved.unk_1B0;
+    racer->unk_1B4 = sGdxRollSaved.unk_1B4;
+    racer->unk_1B8 = sGdxRollSaved.unk_1B8;
+    racer->unk_1BC = sGdxRollSaved.unk_1BC;
+    racer->unk_1C4 = sGdxRollSaved.unk_1C4;
+    racer->unk_1D0 = sGdxRollSaved.unk_1D0;
+    racer->unk_1E0 = sGdxRollSaved.unk_1E0;
+    racer->unk_1E4 = sGdxRollSaved.unk_1E4;
+    racer->unk_1E8 = sGdxRollSaved.unk_1E8;
+    racer->unk_1EC = sGdxRollSaved.unk_1EC;
+    racer->unk_1F8 = sGdxRollSaved.unk_1F8;
+}
 
 extern u8 gGdxFaceSpinAttack[];
 
@@ -669,10 +690,30 @@ void Racer_SetupStartPositions(void) {
 #ifdef PORT
     // Speed Lap: start alone where the 30th grid slot would be (29 more 100-unit steps back, the
     // same spacing the single-player grid uses), so there's a full grid's worth of road to get
-    // up to speed before the timed first lap begins at the line.
+    // up to speed before the timed first lap begins at the line. A rolling start goes further back.
     if (Gdx_SpeedLapActive()) {
         f32 gdxMag;
-        for (i = 29 * 20; i > 0; i--) {
+        // Run-up: 29 grid slots (2900 units). Rolling start: another 6000 units of run-in that an
+        // autopilot covers during the countdown, capped so it can't reach back into the final corners.
+        f32 gdxDist = 2900.0f;
+        f32 gdxGridSteps = 2900.0f / 5.0f;
+        f32 gdxScratch;
+        if (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0) {
+            // Far enough back to reach full speed before the countdown; the countdown is then
+            // held until GO will land as the machine reaches the back of the grid.
+            gdxDist += 21000.0f;
+            if (gdxDist > gCurrentCourseInfo->length * 0.45f) {
+                gdxDist = gCurrentCourseInfo->length * 0.45f;
+            }
+        }
+        sGdxRollHoldFrames = 0;
+        sGdxRollSynced = false;
+        sGdxGridBackLapDist = -1.0f;
+        for (i = (s32) (gdxDist / 5.0f); i > 0; i--) {
+            if ((s32) ((gdxDist / 5.0f) - i) == (s32) gdxGridSteps) {
+                Course_SplineGetLengthInfo(racerStartSegment, t, &gdxScratch);
+                sGdxGridBackLapDist = gdxScratch;
+            }
             gdxMag = Course_SplineGetTangent(racerStartSegment, t, &gRacers[0].segmentPositionInfo.segmentForward);
             t -= 5.0f / gdxMag;
             if (t < 0.0f) {
@@ -4754,7 +4795,13 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
             }
 #endif
             if (!(racer->stateFlags & (RACER_STATE_CRASHED | RACER_STATE_FINISHED | RACER_STATE_FALLING_OFF_TRACK)) &&
+#ifdef PORT
+                // A rolling Speed Lap start can reach the line before GO; count that crossing.
+                ((gRaceIntroTimer < 40) || (Gdx_SpeedLapActive() && (racer == gRacers))) &&
+                (gGameMode != GAMEMODE_RECORDS)) {
+#else
                 (gRaceIntroTimer < 40) && (gGameMode != GAMEMODE_RECORDS)) {
+#endif
 
                 sp128 -= racer->lapDistance;
                 racer->unk_288++;
@@ -4777,6 +4824,11 @@ void Racer_UpdateFromControls(Racer* racer, Controller* controller) {
                         racer->raceTime = 0;
                         racer->completedLapsTime = 0;
                         Racer_GdxSpeedLapStartTiming();
+                        // Start the timed lap on full energy (the run-in may have used boost),
+                        // following the same setting as the every-lap refill.
+                        if (CVarGetInteger("gEnhancements.Gameplay.RefillEnergyEachLap", 1) != 0) {
+                            racer->energy = racer->maxEnergy;
+                        }
                     }
 #endif
                     if ((racer->lap == racer->lapsCompleted + 1) && (racer->lap <= (gTotalLapCount + 1))) {
@@ -5501,6 +5553,32 @@ void Racer_UpdateMovement(Racer* racer) {
                 racer->unk_2A4--;
             }
         }
+#ifdef PORT
+        // Speed Lap rolling start run-in: ignore the CPU's buttons. Hold the accelerator (no boosts,
+        // drifting or side attacks), use the player's own handling and top speed, and steer for
+        // the centre line instead of the CPU's racing line (which detours over recovery strips).
+        if ((racer == gRacers) && (gRaceIntroTimer > 40) && Gdx_SpeedLapActive() &&
+            (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+            f32 gdxLateral = (racer->segmentPositionInfo.segmentDisplacement.x * racer->segmentBasis.z.x) +
+                             (racer->segmentPositionInfo.segmentDisplacement.y * racer->segmentBasis.z.y) +
+                             (racer->segmentPositionInfo.segmentDisplacement.z * racer->segmentBasis.z.z);
+            f32 gdxHeading = (racer->trueBasis.x.x * racer->segmentBasis.z.x) +
+                             (racer->trueBasis.x.y * racer->segmentBasis.z.y) +
+                             (racer->trueBasis.x.z * racer->segmentBasis.z.z);
+            s32 gdxStick = Math_Round((gdxLateral * 0.4f) + (gdxHeading * 300.0f));
+
+            if (gdxStick > 50) {
+                gdxStick = 50;
+            } else if (gdxStick < -50) {
+                gdxStick = -50;
+            }
+            Racer_GdxRollRestoreStats(racer);
+            dummyController.stickX = gdxStick;
+            dummyController.buttonPressed = 0;
+            dummyController.buttonCurrent = BTN_A;
+            dummyController.buttonReleased = 0;
+        }
+#endif
         Racer_UpdateFromControls(racer, &dummyController);
     } else {
         Racer_UpdateFromControls(racer, &gControllers[gPlayerControlPorts[racer->id]]);
@@ -5558,6 +5636,12 @@ void Racer_Update(void) {
                    dynTable[0] instead of 28. The engine-sound loop below stays non-EK-only:
                    EK starts engine sound from the NA_SE_11 handler in audio/disk/external.c. */
                 if (gTitleDemoState == TITLE_DEMO_INACTIVE) {
+#ifdef PORT
+                    // Speed Lap rolling start: no intro fanfare. Audio_StartDemo also mutes engine
+                    // sound until GO (D_80771CA8), which the run-in needs.
+                    if (!(Gdx_SpeedLapActive() &&
+                          CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0))
+#endif
                     Audio_StartDemo();
                 }
 #ifndef EXPANSION_KIT
@@ -5568,6 +5652,52 @@ void Racer_Update(void) {
             }
 
             gRaceIntroTimer--;
+#ifdef PORT
+            // Speed Lap rolling start: as the intro begins, release the player's machine under CPU
+            // control so it drives the run-in and arrives at speed. Control returns at GO.
+            if ((gRaceIntroTimer == 459) && Gdx_SpeedLapActive() &&
+                CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0) {
+                sGdxRollSaved = gRacers[0];
+                gRacers[0].stateFlags |= RACER_STATE_FLAGS_400000 | RACER_STATE_CPU_CONTROLLED;
+                // Engine already lit: full hover height and booster flames. Normally the engine
+                // idles low with no flames until the player presses a button late in the countdown.
+                gRacers[0].unk_17C = 13.0f;
+                func_800BAE5C(0); // start the engine sound now rather than at GO
+                {
+                    // Launch at 1000 km/h (km/h = speed * 21.6, see the HUD speedometer), above any
+                    // machine's non-boost top speed. There is no top-speed stat; it emerges from
+                    // engine force vs drag, so the game's own physics settles the machine to its real
+                    // top speed during the run-in, whatever the accel/max-speed setting.
+                    Vec3f* gdxF = &gRacers[0].segmentPositionInfo.segmentForward;
+                    f32 gdxMag = sqrtf(SQ(gdxF->x) + SQ(gdxF->y) + SQ(gdxF->z));
+                    f32 gdxSpeed = 1000.0f / 21.6f;
+                    if (gdxMag > 0.0f) {
+                        gRacers[0].velocity.x = gdxF->x * (gdxSpeed / gdxMag);
+                        gRacers[0].velocity.y = gdxF->y * (gdxSpeed / gdxMag);
+                        gRacers[0].velocity.z = gdxF->z * (gdxSpeed / gdxMag);
+                        gRacers[0].speed = gdxSpeed;
+                    }
+                }
+            }
+            // Hold the countdown just before "3" until the run-in is close enough that GO lands
+            // about 5 seconds (300 frames) at the current speed before the back of the grid, so the
+            // player gets a few seconds of driving before the line.
+            if ((gRaceIntroTimer == 220) && !sGdxRollSynced && Gdx_SpeedLapActive() &&
+                CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0 &&
+                (sGdxGridBackLapDist >= 0.0f)) {
+                f32 gdxRemaining = sGdxGridBackLapDist - gRacers[0].lapDistance;
+                if (gdxRemaining < 0.0f) {
+                    gdxRemaining += gCurrentCourseInfo->length;
+                }
+                if ((gdxRemaining < gCurrentCourseInfo->length * 0.5f) &&
+                    (gdxRemaining > gRacers[0].speed * (180.0f + 300.0f)) && (sGdxRollHoldFrames < 60 * 30)) {
+                    gRaceIntroTimer = 221;
+                    sGdxRollHoldFrames++;
+                } else {
+                    sGdxRollSynced = true;
+                }
+            }
+#endif
             if (gRaceIntroTimer == 40) {
 #ifdef EXPANSION_KIT
                 if (func_807424CC() != 0) {
@@ -5578,6 +5708,14 @@ void Racer_Update(void) {
                     for (racer = sLastRacer; racer >= gRacers; racer--) {
                         racer->stateFlags |= RACER_STATE_FLAGS_400000;
                     }
+#ifdef PORT
+                    // Speed Lap rolling start: the autopilot that drove the run-in hands over at GO.
+                    if (Gdx_SpeedLapActive() &&
+                        CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0) {
+                        gRacers[0].stateFlags &= ~RACER_STATE_CPU_CONTROLLED;
+                        Racer_GdxRollRestoreStats(&gRacers[0]);
+                    }
+#endif
 #ifdef PORT
                     /* Fires exactly once at GO, after every racer is armed. Under EXPANSION_KIT
                        this block only runs on the pass where the disk-retry above let the
@@ -5635,6 +5773,33 @@ void Racer_Update(void) {
             }
             var_fs0 = (1500.0f * var_fs0 * var_fs0) + 33.0f;
             var_fs2 = var_fs0 - racer2->heightAboveGround;
+#ifdef PORT
+            {
+                // The countdown sign hangs just ahead of the machine. On a rolling Speed Lap start the
+                // machine is moving fast during the countdown, so lead the sign by one frame of travel
+                // or it trails into the machine.
+                f32 gdxLeadX = 0.0f;
+                f32 gdxLeadY = 0.0f;
+                f32 gdxLeadZ = 0.0f;
+                if ((racer2 == gRacers) && Gdx_SpeedLapActive() &&
+                    (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+                    gdxLeadX = racer2->velocity.x;
+                    gdxLeadY = racer2->velocity.y;
+                    gdxLeadZ = racer2->velocity.z;
+                }
+                Matrix_SetLockedLookAt(&gGfxPool->unk_21988[i], NULL, 0.2f, 0.2f, 0.2f, spCC.x.x, spCC.x.y, spCC.x.z,
+                                       spCC.y.x, spCC.y.y, spCC.y.z,
+                                       (racer2->segmentPositionInfo.pos.x + gdxLeadX + (var_fs2 * racer2->trueBasis.y.x) +
+                                        (50.0f * racer2->trueBasis.x.x)) -
+                                           (var_fs0 * camera->basis.x.x),
+                                       (racer2->segmentPositionInfo.pos.y + gdxLeadY + (var_fs2 * racer2->trueBasis.y.y) +
+                                        (50.0f * racer2->trueBasis.x.y)) -
+                                           (var_fs0 * camera->basis.x.y),
+                                       (racer2->segmentPositionInfo.pos.z + gdxLeadZ + (var_fs2 * racer2->trueBasis.y.z) +
+                                        (50.0f * racer2->trueBasis.x.z)) -
+                                           (var_fs0 * camera->basis.x.z));
+            }
+#else
             Matrix_SetLockedLookAt(&gGfxPool->unk_21988[i], NULL, 0.2f, 0.2f, 0.2f, spCC.x.x, spCC.x.y, spCC.x.z,
                                    spCC.y.x, spCC.y.y, spCC.y.z,
                                    (racer2->segmentPositionInfo.pos.x + (var_fs2 * racer2->trueBasis.y.x) +
@@ -5646,6 +5811,7 @@ void Racer_Update(void) {
                                    (racer2->segmentPositionInfo.pos.z + (var_fs2 * racer2->trueBasis.y.z) +
                                     (50.0f * racer2->trueBasis.x.z)) -
                                        (var_fs0 * camera->basis.x.z));
+#endif
         }
     }
 
@@ -6406,7 +6572,15 @@ Gfx* Racer_Draw(Gfx* gfx, s32 playerIndex) {
             }
         }
     }
+#ifdef PORT
+    // Early in the intro the stock game hides machine shadows and zeroes speed, which also kills
+    // the booster flame tails (their length is speed * 0.9). A rolling Speed Lap start is already
+    // driving then, so keep both.
+    if ((gRaceIntroTimer < 280) ||
+        (Gdx_SpeedLapActive() && CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+#else
     if (gRaceIntroTimer < 280) {
+#endif
         gSPDisplayList(gfx++, D_303A758);
         if (gGameMode == GAMEMODE_GP_END_CS) {
             gSPSetGeometryMode(gfx++, G_ZBUFFER);
