@@ -342,6 +342,19 @@ extern s32 gGameMode;
 extern s8 D_8079FB28[];
 
 void CourseSelect_Init(void) {
+#ifdef PORT
+    {
+        // Speed Lap is picked from the Practice board but runs as Time Attack. Switch here, once
+        // the main menu is gone, so the menu never flashes the Time Attack submenu on the way out.
+        // MainMenu_Init switches back so the cursor returns to the Practice board.
+        extern s32 gGdxSpeedLapSelected;
+        extern s32 gModeSubOption[];
+        if (gGdxSpeedLapSelected && (gSelectedMode == MODE_PRACTICE)) {
+            gSelectedMode = MODE_TIME_ATTACK;
+            gModeSubOption[MODE_TIME_ATTACK] = 0;
+        }
+    }
+#endif
     s32 i;
     s32 j;
     s32 k;

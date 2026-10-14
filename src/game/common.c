@@ -24,12 +24,15 @@ s32 D_800CD384 = 0;
 s32 gModeSubOption[8] = { 0 };
 
 #ifdef PORT
-// Speed Lap: the third Time Attack submenu option (main_menu.c). A solo Time Attack with
-// Practice's endless laps and best-lap HUD; the race never finishes, you quit from pause.
-// gModeSubOption only changes in the main menu, so it stays valid for the whole session.
+// Speed Lap: the first entry in the Practice board's submenu (main_menu.c). It runs as a solo
+// Time Attack with Practice's endless laps and best-lap HUD; the race never finishes, you quit
+// from pause. The main menu sets this flag (and switches gSelectedMode to Time Attack) when it
+// hands over to course select, and clears it for every other mode.
+s32 gGdxSpeedLapSelected = 0;
+
 bool Gdx_SpeedLapActive(void) {
     extern s32 gGameMode;
-    return (gGameMode == GAMEMODE_TIME_ATTACK) && (gModeSubOption[MODE_TIME_ATTACK] == 2);
+    return (gGameMode == GAMEMODE_TIME_ATTACK) && (gGdxSpeedLapSelected != 0);
 }
 
 // The lap-2 "BOOSTER OK!!" sign + "You got boost power" voice and the "FINAL LAP" sign + voice.

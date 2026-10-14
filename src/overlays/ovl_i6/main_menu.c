@@ -107,6 +107,17 @@ extern f32 D_800CE74C;
 extern f32 D_800CE750;
 
 void MainMenu_Init(void) {
+#ifdef PORT
+    // Coming back from Speed Lap (which runs as Time Attack): put the cursor back on the Practice
+    // board with Speed Lap highlighted.
+    extern s32 gGdxSpeedLapSelected;
+    extern s32 gSelectedMode;
+    extern s32 gModeSubOption[];
+    if (gGdxSpeedLapSelected && (gSelectedMode == MODE_TIME_ATTACK)) {
+        gSelectedMode = MODE_PRACTICE;
+        gModeSubOption[MODE_PRACTICE] = 0;
+    }
+#endif
     D_800CCFE8 = 3;
 #ifdef EXPANSION_KIT
     D_800CE748 = D_800CE74C = D_800CE750 = 0.1f;
@@ -163,9 +174,11 @@ extern s32 gTransitionState;
 extern s32 gLeoDriveConnectionState;
 
 #ifdef PORT
-// Time Attack gains a third submenu option, Speed Lap (index 2, below RECORDS).
-const s32 kDefaultSubOptionLimits[] = { 2, 2, 0, 2, 0, 2, 0, 0 };
-const s32 kMaxSubOptionLimits[] = { 3, 2, 0, 2, 0, 3, 0, 0 };
+// The Practice board's submenu gains Speed Lap as its first entry (index 0); the difficulties
+// move down one (NOVICE = 1 ...). See gGdxSpeedLapSelected in common.c.
+extern s32 gGdxSpeedLapSelected;
+const s32 kDefaultSubOptionLimits[] = { 2, 1, 0, 2, 0, 3, 0, 0 };
+const s32 kMaxSubOptionLimits[] = { 3, 1, 0, 2, 0, 4, 0, 0 };
 #else
 const s32 kDefaultSubOptionLimits[] = { 2, 1, 0, 2, 0, 2, 0, 0 };
 const s32 kMaxSubOptionLimits[] = { 3, 1, 0, 2, 0, 3, 0, 0 };
@@ -354,10 +367,9 @@ s32 MainMenu_Update(void) {
                         break;
                     case MODE_TIME_ATTACK:
 #ifdef PORT
-                        if (gModeSubOption[MODE_TIME_ATTACK] == 1) { // 2 = Speed Lap races like 0
-#else
-                        if (gModeSubOption[MODE_TIME_ATTACK] != 0) {
+                        gGdxSpeedLapSelected = 0; // plain Time Attack / Records never run as Speed Lap
 #endif
+                        if (gModeSubOption[MODE_TIME_ATTACK] != 0) {
                             D_800CD384 = 6;
                             gMenuChangeMode = MENU_CHANGE_TO_RECORDS;
                             Audio_TriggerSystemSE(NA_SE_62);
@@ -371,6 +383,14 @@ s32 MainMenu_Update(void) {
                     case MODE_GP_RACE:
                     case MODE_PRACTICE:
                         gNumPlayers = 1;
+#ifdef PORT
+                        if (gSelectedMode == MODE_PRACTICE) {
+                            // Index 0 is Speed Lap; the difficulties start at 1.
+                            gDifficulty = gAntiPiracyAddedDifficulty +
+                                          ((gModeSubOption[MODE_PRACTICE] > 0) ? (gModeSubOption[MODE_PRACTICE] - 1) : 0);
+                            break;
+                        }
+#endif
                         gDifficulty = gAntiPiracyAddedDifficulty + gModeSubOption[gSelectedMode];
                         break;
                 }
@@ -452,6 +472,11 @@ s32 MainMenu_Update(void) {
             break;
         case 4:
             if (gGameModeChangeState == GAMEMODE_UPDATE) {
+#ifdef PORT
+                // Speed Lap (Practice board, first entry) runs as Time Attack from course select on.
+                // (CourseSelect_Init switches gSelectedMode to Time Attack once the menu is gone.)
+                gGdxSpeedLapSelected = (gSelectedMode == MODE_PRACTICE) && (gModeSubOption[MODE_PRACTICE] == 0);
+#endif
                 gMenuChangeMode = MENU_CHANGE_TO_COURSE_SELECT;
             }
             break;
@@ -924,8 +949,14 @@ Gfx* MainMenu_DifficultyDraw(Gfx* gfx, Object* difficultyObj) {
     gfx = func_80078EA0_impl(gfx, sSelectModeOptionFlamesCompTexInfo, OBJECT_LEFT(difficultyObj) - temp_s6,
                              OBJECT_TOP(difficultyObj), 0, 0, 0, 1.0f, 1.0f, true);
 
-    for (i = 0; i < 4; i++) {
-        if (gModeSubOption[gSelectedMode] == i) {
+#ifdef PORT
+    // Practice board: Speed Lap is the first row (index 0), drawn with the game's font since no
+    // texture exists for it; the difficulty rows below are shifted down one index and one row.
+    s32 gdxRowShift = 0;
+    if (gSelectedMode == MODE_PRACTICE) {
+        static s8 sSpeedLapLabel[] = "SPEED LAP";
+        gdxRowShift = 1;
+        if (gModeSubOption[MODE_PRACTICE] == 0) {
             switch (D_800CD384) {
                 case 2:
                 case 3:
@@ -939,6 +970,44 @@ Gfx* MainMenu_DifficultyDraw(Gfx* gfx, Object* difficultyObj) {
         } else {
             gDPSetPrimColor(gfx++, 0, 0, 255, 255, 255, 255);
         }
+        gfx = Font_DrawString(gfx, (OBJECT_LEFT(difficultyObj) - temp_s6) + 0x20,
+                              OBJECT_TOP(difficultyObj) + 0x12, sSpeedLapLabel, 0, FONT_SET_3, 1);
+    }
+#endif
+    for (i = 0; i < 4; i++) {
+#ifdef PORT
+        if (gModeSubOption[gSelectedMode] == i + gdxRowShift) {
+#else
+        if (gModeSubOption[gSelectedMode] == i) {
+#endif
+            switch (D_800CD384) {
+                case 2:
+                case 3:
+                case 4:
+                    gDPSetPrimColor(gfx++, 0, 0, 0, 255, 0, 255);
+                    break;
+                default:
+                    gfx = func_8007DB28(gfx, 0);
+                    break;
+            }
+        } else {
+            gDPSetPrimColor(gfx++, 0, 0, 255, 255, 255, 255);
+        }
+#ifdef PORT
+        if (gdxRowShift != 0) {
+            // Rows 1..4 under the Speed Lap row, a little tighter to fit the panel.
+            if ((gUnlockableLevel < 2) && !gSettingEverythingUnlocked) {
+                if (i < 3) {
+                    gfx = func_80078EA0_impl(gfx, sDifficultyCompTexInfos[i], (OBJECT_LEFT(difficultyObj) - temp_s6) + 0x20,
+                                             OBJECT_TOP(difficultyObj) + ((i + 1) * 16) + 0xE, 1, 0, 0, 1.0f, 1.0f, true);
+                }
+            } else {
+                gfx = func_80078EA0_impl(gfx, sDifficultyCompTexInfos[i], (OBJECT_LEFT(difficultyObj) - temp_s6) + 0x20,
+                                         OBJECT_TOP(difficultyObj) + ((i + 1) * 14) + 7, 1, 0, 0, 1.0f, 1.0f, true);
+            }
+            continue;
+        }
+#endif
         if ((gUnlockableLevel < 2) && !gSettingEverythingUnlocked) {
             if (i < 3) {
 #ifdef VERSION_JP
@@ -1023,30 +1092,6 @@ Gfx* MainMenu_TimeAttackModeDraw(Gfx* gfx, Object* timeAttackModeObj) {
                                  OBJECT_TOP(timeAttackModeObj) + (i * 28) + 0x15, 1, 0, 0, 1.0f, 1.0f, true);
 #endif
     }
-#ifdef PORT
-    {
-        // Speed Lap: drawn with the game's own font (no texture exists for it), tinted with the
-        // same highlight/white prim colour logic as the stock options above.
-        static s8 sSpeedLapLabel[] = "SPEED LAP";
-        s32 labelWidth = Font_GetStringWidth(sSpeedLapLabel, FONT_SET_3, 0);
-        if (gModeSubOption[MODE_TIME_ATTACK] == 2) {
-            switch (D_800CD384) {
-                case 2:
-                case 3:
-                case 4:
-                    gDPSetPrimColor(gfx++, 0, 0, 0, 255, 0, 255);
-                    break;
-                default:
-                    gfx = func_8007DB28(gfx, 0);
-                    break;
-            }
-        } else {
-            gDPSetPrimColor(gfx++, 0, 0, 255, 255, 255, 255);
-        }
-        gfx = Font_DrawString(gfx, ((0x80 - labelWidth) / 2) + OBJECT_LEFT(timeAttackModeObj) - temp_s7,
-                              OBJECT_TOP(timeAttackModeObj) + (2 * 28) + 0x15 + 16, sSpeedLapLabel, 0, FONT_SET_3, 1);
-    }
-#endif
 
     return gfx;
 }

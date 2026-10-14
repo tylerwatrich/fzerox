@@ -723,6 +723,28 @@ void Racer_SetupStartPositions(void) {
                 t += 1.0f;
             }
         }
+        // Never start over a gap (a TRACK_SHAPE_AIR section with no road under it, like the slits
+        // on Red Canyon's Slim-Line Slits): keep backing up until there are 500 units of solid
+        // track behind the gap, so the machine starts on the road and jumps the gap normally.
+        if ((racerStartSegment->trackSegmentInfo & TRACK_SHAPE_MASK) == TRACK_SHAPE_AIR) {
+            s32 gdxSolidSteps = 0;
+            s32 gdxGuard = (s32) (gCurrentCourseInfo->length * 0.3f / 5.0f);
+            while ((gdxSolidSteps < 100) && (gdxGuard-- > 0)) {
+                if ((racerStartSegment->trackSegmentInfo & TRACK_SHAPE_MASK) == TRACK_SHAPE_AIR) {
+                    gdxSolidSteps = 0;
+                } else {
+                    gdxSolidSteps++;
+                }
+                gdxMag = Course_SplineGetTangent(racerStartSegment, t, &gRacers[0].segmentPositionInfo.segmentForward);
+                t -= 5.0f / gdxMag;
+                if (t < 0.0f) {
+                    racerStartSegment = racerStartSegment->prev;
+                    t *= gdxMag / Course_SplineGetTangent(racerStartSegment, 1.0f,
+                                                          &gRacers[0].segmentPositionInfo.segmentForward);
+                    t += 1.0f;
+                }
+            }
+        }
     }
 #endif
 
@@ -5558,14 +5580,38 @@ void Racer_UpdateMovement(Racer* racer) {
         // drifting or side attacks), use the player's own handling and top speed, and steer for
         // the centre line instead of the CPU's racing line (which detours over recovery strips).
         if ((racer == gRacers) && (gRaceIntroTimer > 40) && Gdx_SpeedLapActive() &&
-            (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+            (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0) &&
+            (CVarGetInteger("gEnhancements.Gameplay.SpeedLapRollingStockAi", 1) == 0)) {
             f32 gdxLateral = (racer->segmentPositionInfo.segmentDisplacement.x * racer->segmentBasis.z.x) +
                              (racer->segmentPositionInfo.segmentDisplacement.y * racer->segmentBasis.z.y) +
                              (racer->segmentPositionInfo.segmentDisplacement.z * racer->segmentBasis.z.z);
             f32 gdxHeading = (racer->trueBasis.x.x * racer->segmentBasis.z.x) +
                              (racer->trueBasis.x.y * racer->segmentBasis.z.y) +
                              (racer->trueBasis.x.z * racer->segmentBasis.z.z);
-            s32 gdxStick = Math_Round((gdxLateral * 0.4f) + (gdxHeading * 300.0f));
+            // Steering target in the CPU's lane coordinate (racer->unk_33C convention: +right, and the
+            // car settles where lane + lateral == 0). Aim for the geometric middle of the track, and
+            // dodge dirt using the CPU's per-segment dirt map (Cpu_GenerateInputs fills
+            // segmentDirt / nextSegmentDirt): one-sided dirt shifts us away from it, middle dirt
+            // sends us to whichever side we're nearer.
+            f32 gdxCentre = (racer->currentRadiusRight - racer->currentRadiusLeft) * 0.5f;
+            f32 gdxLane = gdxCentre;
+            s32 gdxDirt = (racer->segmentDirt != DIRT_NONE) ? racer->segmentDirt : racer->nextSegmentDirt;
+            s32 gdxStick;
+
+            if (gdxDirt == DIRT_LEFT) {
+                gdxLane = gdxCentre + 40.0f;
+            } else if (gdxDirt == DIRT_RIGHT) {
+                gdxLane = gdxCentre - 40.0f;
+            } else if (gdxDirt == DIRT_MIDDLE) {
+                gdxLane = (-gdxLateral >= gdxCentre) ? (gdxCentre + 160.0f) : (gdxCentre - 160.0f);
+            }
+            if (gdxLane > racer->currentRadiusRight - 46.0f) {
+                gdxLane = racer->currentRadiusRight - 46.0f;
+            }
+            if (gdxLane < 46.0f - racer->currentRadiusLeft) {
+                gdxLane = 46.0f - racer->currentRadiusLeft;
+            }
+            gdxStick = Math_Round(((gdxLateral + gdxLane) * 0.4f) + (gdxHeading * 300.0f));
 
             if (gdxStick > 50) {
                 gdxStick = 50;
@@ -5577,6 +5623,13 @@ void Racer_UpdateMovement(Racer* racer) {
             dummyController.buttonPressed = 0;
             dummyController.buttonCurrent = BTN_A;
             dummyController.buttonReleased = 0;
+        }
+        // Stock CPU driving the run-in: no boosting, so the machine arrives at its natural top speed.
+        if ((racer == gRacers) && (gRaceIntroTimer > 40) && Gdx_SpeedLapActive() &&
+            (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0)) {
+            dummyController.buttonCurrent &= (u16) ~BTN_B;
+            dummyController.buttonPressed &= (u16) ~BTN_B;
+            dummyController.buttonReleased &= (u16) ~BTN_B;
         }
 #endif
         Racer_UpdateFromControls(racer, &dummyController);

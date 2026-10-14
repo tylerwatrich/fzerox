@@ -1660,6 +1660,20 @@ void Cpu_GenerateInputs(Racer* racer, Controller* controller) {
             racer->segmentDirt = COURSE_CONTEXT()->courseData.dirt[var_a3];
             racer->segmentIce = COURSE_CONTEXT()->courseData.ice[var_a3];
             racer->segmentPit = COURSE_CONTEXT()->courseData.pit[var_a3];
+#ifdef PORT
+            {
+                // Speed Lap rolling start: the CPU driving the player's run-in must not detour over
+                // recovery pads. Hide them from it (lava pits stay, so it still avoids those).
+                extern bool Gdx_SpeedLapActive(void);          // common.c
+                extern int CVarGetInteger(const char* name, int defaultValue);
+                extern s32 gRaceIntroTimer;
+                if ((racer == &gRacers[0]) && (gRaceIntroTimer > 40) && Gdx_SpeedLapActive() &&
+                    (CVarGetInteger("gEnhancements.Gameplay.SpeedLapFlyingStart", 0) != 0) &&
+                    (racer->segmentPit != PIT_NONE) && (racer->segmentPit < PIT_LAVA_BOTH)) {
+                    racer->segmentPit = PIT_NONE;
+                }
+            }
+#endif
             // Look for dash pads in expert and master only
             if (gDifficulty >= EXPERT) {
                 racer->segmentDash = COURSE_CONTEXT()->courseData.dash[var_a3];
